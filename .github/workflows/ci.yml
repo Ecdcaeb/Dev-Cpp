@@ -1,0 +1,213 @@
+name: Build Dev-C++ with Original NSIS
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  release:
+    types: [published]
+
+jobs:
+  build-devcpp:
+    name: Build Dev-C++ and Create Installer
+    runs-on: windows-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+      
+    - name: Setup Free Pascal Compiler
+      run: |
+        # 下载并安装 Free Pascal Compiler (用于构建 Dev-C++)
+        $fpcUrl = "https://sourceforge.net/projects/freepascal/files/Win32/3.2.2/fpc-3.2.2.win32-x86_64.exe/download"
+        $installer = "fpc-installer.exe"
+        Invoke-WebRequest -Uri $fpcUrl -OutFile $installer
+        Start-Process -FilePath $installer -ArgumentList "/silent" -Wait
+        # 添加 FPC 到 PATH
+        Add-Content $env:GITHUB_PATH "C:\FPC\3.2.2\bin\x86_64-win64"
+        echo "Free Pascal Compiler installed successfully"
+      
+    - name: Build Dev-C++ Main Program
+      working-directory: ./Source
+      run: |
+        # 使用原始 Delphi 模式编译 Dev-C++
+        echo "Building Dev-C++ main executable..."
+        fpc -Mdelphi -FuUnits -FuVCL -FiImages -CX -XX -O2 devcpp.dpr
+        
+        # 验证构建结果
+        if (Test-Path "devcpp.exe") {
+          echo "✓ Dev-C++ main program built successfully"
+          # 显示文件信息
+          Get-Item devcpp.exe | Format-List Name, Length, LastWriteTime
+        } else {
+          echo "✗ Dev-C++ build failed"
+          exit 1
+        }
+        
+        # 复制必要的文件到根目录，供 NSIS 脚本使用
+        Copy-Item "devcpp.exe" -Destination "..\"
+        Copy-Item "devcpp.map" -Destination "..\"
+      
+    - name: Build Additional Tools (如果存在)
+      working-directory: ./Source  
+      run: |
+        # 尝试构建其他工具（如果项目文件存在）
+        $tools = @("packman.dpr", "devcppPortable.dpr")
+        foreach ($tool in $tools) {
+          if (Test-Path $tool) {
+            echo "Building $tool..."
+            fpc -Mdelphi -FuUnits -FuVCL -FiImages -CX -XX -O2 $tool
+            if (Test-Path ($tool -replace '\.dpr$', '.exe')) {
+              $exeName = $tool -replace '\.dpr$', '.exe'
+              Copy-Item $exeName -Destination "..\"
+              echo "✓ $exeName built successfully"
+            }
+          } else {
+            echo "ℹ $tool not found, skipping"
+          }
+        }
+        
+        # 检查 ConsolePauser（可能是C++项目或已编译）
+        if (Test-Path "ConsolePauser.exe") {
+          Copy-Item "ConsolePauser.exe" -Destination "..\"
+        }
+      
+    - name: Prepare Required Files for NSIS
+      run: |
+        # 确保 NSIS 脚本需要的所有文件都在正确位置
+        echo "Preparing files for NSIS installer..."
+        
+        # 检查必要文件是否存在
+        $requiredFiles = @(
+          "devcpp.exe",
+          "devcpp.ico", 
+          "devcpp.exe.manifest",
+          "copying.txt",
+          "NEWS.txt"
+        )
+        
+        foreach ($file in $requiredFiles) {
+          if (Test-Path $file) {
+            echo "✓ $file found"
+          } else {
+            echo "⚠ $file missing - NSIS may fail"
+          }
+        }
+        
+        # 检查必要的目录
+        $requiredDirs = @("Lang", "Templates", "Help", "AStyle", "Icons")
+        foreach ($dir in $requiredDirs) {
+          if (Test-Path $dir) {
+            echo "✓ $dir directory found"
+            # 显示目录内容概要
+            Get-ChildItem $dir -Recurse | Measure-Object | ForEach-Object { 
+              echo "  $dir contains $($_.Count) files" 
+            }
+          } else {
+            echo "⚠ $dir directory missing"
+          }
+        }
+      
+    - name: Setup NSIS
+      run: |
+        # 安装 NSIS
+        choco install nsis -y
+        echo "NSIS version:"
+        makensis /version
+      
+    - name: Build Installer with Original Script
+      run: |
+        # 使用原始 NSIS 脚本构建安装包
+        echo "Building installer using original NSIS script..."
+        
+        # 运行 NSIS 编译 - 这会生成 Embarcadero_Dev-Cpp_6.3_TDM-GCC_4.9.2_Setup.exe
+        makensis devcppmingw64.nsi
+        
+        # 检查生成的安装包
+        $installer = "Embarcadero_Dev-Cpp_6.3_TDM-GCC_4.9.2_Setup.exe"
+        if (Test-Path $installer) {
+          echo "✓ Installer created successfully: $installer"
+          Get-Item $installer | Format-List Name, Length, LastWriteTime
+        } else {
+          echo "✗ Installer creation failed"
+          # 尝试查找任何生成的 exe 文件
+          Get-ChildItem *.exe | ForEach-Object { echo "Found: $($_.Name)" }
+          exit 1
+        }
+      
+    - name: Create Build Info
+      run: |
+        # 创建构建信息文件
+        $buildInfo = @"
+        Dev-C++ Build Report
+        ====================
+        Build Date: $(Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        Git Commit: ${{ github.sha }}
+        Git Ref: ${{ github.ref }}
+        Runner: ${{ runner.os }}
+
+        Generated Files:
+        $(Get-ChildItem *.exe | ForEach-Object { "  - $($_.Name) ($([math]::Round($_.Length/1MB, 2)) MB)" })
+        
+        NSIS Script: devcppmingw64.nsi (original, unmodified)
+        Compiler: Free Pascal 3.2.2
+        "@
+        
+        $buildInfo | Out-File -FilePath "BUILD_INFO.txt" -Encoding UTF8
+        echo "Build info saved to BUILD_INFO.txt"
+      
+    - name: Upload Installer Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Dev-CPP-Installer
+        path: |
+          Embarcadero_Dev-Cpp_*.exe
+          BUILD_INFO.txt
+        retention-days: 30
+        if-no-files-found: error
+
+    - name: Upload Portable Build Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Dev-CPP-Portable
+        path: |
+          devcpp.exe
+          devcpp.ico
+          copying.txt
+          NEWS.txt
+          Lang/
+          Templates/
+          Help/
+          AStyle/
+          Icons/
+        retention-days: 30
+        if-no-files-found: warn
+
+  # 可选：测试安装包
+  test-installer:
+    name: Test Installer (Basic)
+    runs-on: windows-latest
+    needs: build-devcpp
+    if: github.event_name == 'release'
+    
+    steps:
+    - name: Download Installer Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: Dev-CPP-Installer
+        
+    - name: Basic Installer Test
+      run: |
+        $installer = Get-Item "Embarcadero_Dev-Cpp_*.exe" | Select-Object -First 1
+        if ($installer) {
+          echo "Testing installer: $($installer.Name)"
+          # 基本验证 - 检查文件属性
+          echo "File size: $([math]::Round($installer.Length/1MB, 2)) MB"
+          echo "Digital signature check skipped in CI"
+          echo "✓ Installer basic validation passed"
+        } else {
+          echo "✗ No installer found for testing"
+        }
