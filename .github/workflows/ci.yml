@@ -2,11 +2,7 @@ name: Build Dev-C++ with Original NSIS
 
 on:
   push:
-    branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
-  release:
-    types: [published]
 
 jobs:
   build-devcpp:
